@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
@@ -22,10 +23,27 @@ from app.services.rainfall import clear_rainfall_cache, fetch_rainfall_points
 
 settings = get_settings()
 
-app = FastAPI(title=settings.APP_NAME)
 
-# Development CORS: dibuat longgar agar frontend Vite di port berapa pun tidak gagal preflight.
-# Kalau sudah deploy online, kunci lagi ke domain frontend yang final.
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load model saat backend startup.
+
+    Catatan:
+    - Ini menggantikan @app.on_event("startup") agar tidak terkena warning deprecated.
+    - Kalau model gagal load, API tetap hidup. Error model bisa dicek lewat /api/model/status.
+    """
+    load_model(force_reload=False)
+    yield
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    lifespan=lifespan,
+)
+
+
+# CORS untuk lokal dan deploy.
+# Untuk testing publik, allow_origin_regex dibuat menerima domain vercel.app.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -33,6 +51,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "https://cloudsat-lite.vercel.app",
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,17 +63,25 @@ async def root():
     return {
         "message": "CloudSat Lite API is running",
         "health": "/api/health",
+        "model_status": "/api/model/status",
         "docs": "/docs",
     }
+
+
+@app.head("/", include_in_schema=False)
+async def root_head():
+    """Endpoint HEAD agar health check Render tidak 405."""
+    return None
 
 
 @app.get("/health", response_model=HealthResponse)
 @app.get("/api/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    model_state = load_model(force_reload=False)
     return HealthResponse(
         status="ok",
         app=settings.APP_NAME,
-        model_loaded=False,
+        model_loaded=model_state.loaded,
     )
 
 
@@ -76,6 +103,20 @@ async def reload_model():
         "loaded": state.loaded,
         "backend_name": state.backend_name,
         "error": state.error,
+    }
+
+
+@app.get("/api/debug/deploy")
+async def debug_deploy():
+    """Debug ringan untuk memastikan Render menjalankan file backend/app/main.py ini."""
+    import os
+
+    return {
+        "message": "This is backend/app/main.py",
+        "cwd": os.getcwd(),
+        "file": __file__,
+        "app": settings.APP_NAME,
+        "model_weights_path": settings.MODEL_WEIGHTS_PATH,
     }
 
 
@@ -127,7 +168,14 @@ async def classify_cloud(
 
             parsed_geo_bbox = GeoBBox(**json.loads(geo_bbox))
 
-        predictions, detected_labels, best_label, best_confidence, bbox_used, message = predict_image(
+        (
+            predictions,
+            detected_labels,
+            best_label,
+            best_confidence,
+            bbox_used,
+            message,
+        ) = predict_image(
             file_bytes=file_bytes,
             bbox=pixel_bbox,
             threshold=threshold,
@@ -163,7 +211,14 @@ async def classify_cloud_bbox(request: CloudBBoxClassifyRequest):
     try:
         gibs_image = await fetch_gibs_bbox_image(request)
 
-        predictions, detected_labels, best_label, best_confidence, bbox_used, message = predict_image(
+        (
+            predictions,
+            detected_labels,
+            best_label,
+            best_confidence,
+            bbox_used,
+            message,
+        ) = predict_image(
             file_bytes=gibs_image.image_bytes,
             bbox=None,
             threshold=request.threshold,
@@ -171,7 +226,10 @@ async def classify_cloud_bbox(request: CloudBBoxClassifyRequest):
 
         preview_data_url = None
         if request.include_preview:
-            preview_data_url = image_to_data_url(gibs_image.image_bytes, gibs_image.content_type)
+            preview_data_url = image_to_data_url(
+                gibs_image.image_bytes,
+                gibs_image.content_type,
+            )
 
         return CloudBBoxClassifyResponse(
             model_loaded=bool(predictions),
