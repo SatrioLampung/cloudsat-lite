@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,11 +51,10 @@ async def root():
 @app.get("/health", response_model=HealthResponse)
 @app.get("/api/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
-    model_state = load_model(force_reload=False)
     return HealthResponse(
         status="ok",
         app=settings.APP_NAME,
-        model_loaded=model_state.loaded,
+        model_loaded=False,
     )
 
 
@@ -113,10 +112,10 @@ async def refresh_data():
 
 @app.post("/api/cloud/classify", response_model=CloudClassifyResponse)
 async def classify_cloud(
-    file: UploadFile = File(...),
-    bbox: Optional[str] = Form(default=None),
-    geo_bbox: Optional[str] = Form(default=None),
-    threshold: Optional[float] = Form(default=None),
+    file: Annotated[UploadFile, File()],
+    bbox: Annotated[Optional[str], Form()] = None,
+    geo_bbox: Annotated[Optional[str], Form()] = None,
+    threshold: Annotated[Optional[float], Form()] = None,
 ):
     try:
         file_bytes = await file.read()
